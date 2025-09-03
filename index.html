@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple To-Do App</title>
+  <style>
+    :root{
+      --bg:#f6f7fb; --card:#ffffff; --muted:#6b7280; --accent:#2563eb;
+      --danger:#ef4444; --success:#10b981;
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    body{
+      margin:0; background:var(--bg); color:#111827; min-height:100vh;
+      display:flex; align-items:flex-start; justify-content:center; padding:32px;
+    }
+    .container{
+      width:100%; max-width:880px;
+    }
+    header{
+      display:flex; align-items:center; justify-content:space-between; gap:16px;
+      margin-bottom:18px;
+    }
+    h1{ margin:0; font-size:1.25rem; }
+    .card{
+      background:var(--card); border-radius:12px; padding:18px; box-shadow:0 6px 18px rgba(17,24,39,0.06);
+    }
+
+    form{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    input[type="text"], input[type="datetime-local"]{
+      padding:10px 12px; border-radius:8px; border:1px solid #e5e7eb; min-width:200px;
+      font-size:0.95rem; outline:none;
+    }
+    input[type="text"]:focus, input[type="datetime-local"]:focus{ box-shadow:0 0 0 3px rgba(37,99,235,0.12); border-color:var(--accent); }
+    button{
+      background:var(--accent); color:white; border:none; padding:10px 14px; border-radius:8px;
+      cursor:pointer; font-weight:600;
+    }
+    button.ghost{ background:transparent; border:1px solid #e5e7eb; color:var(--muted); font-weight:500; }
+    .tasks{ margin-top:16px; display:grid; gap:10px; }
+
+    .task{
+      display:flex; gap:12px; align-items:center; padding:12px; border-radius:10px;
+      border:1px solid #eef2ff; background:linear-gradient(180deg,#fff,#fbfdff);
+      justify-content:space-between;
+    }
+    .task .left{ display:flex; gap:12px; align-items:center; flex:1; min-width:0; }
+    .task .title{ font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .meta{ color:var(--muted); font-size:0.88rem; margin-top:4px; }
+    .controls{ display:flex; gap:8px; align-items:center; margin-left:12px; }
+
+    .btn-icon{ background:transparent; border:none; cursor:pointer; padding:6px; border-radius:8px; }
+    .completed .title{ text-decoration:line-through; color:var(--muted); }
+    .overdue{ border-left:4px solid var(--danger); background:linear-gradient(180deg,#fff8f8,#fff7f7); }
+
+    /* small responsive */
+    @media (max-width:560px){
+      form{ flex-direction:column; align-items:stretch; }
+      input[type="text"]{ width:100%; }
+      .controls{ flex-wrap:wrap; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>To-Do App</h1>
+      <div style="color:var(--muted); font-size:0.95rem;">Saved to your browser (localStorage)</div>
+    </header>
+
+    <section class="card" aria-labelledby="addTask">
+      <h2 id="addTask" style="font-size:1rem; margin:0 0 10px 0;">Add / Edit Task</h2>
+
+      <form id="taskForm" aria-describedby="formHelp">
+        <input id="title" type="text" placeholder="Task title (required)" required />
+        <input id="deadline" type="datetime-local" />
+        <button id="saveBtn" type="submit">Add Task</button>
+        <button id="cancelEdit" type="button" class="ghost" style="display:none">Cancel</button>
+      </form>
+      <div id="formHelp" style="margin-top:8px; color:var(--muted); font-size:0.9rem;">
+        Leave deadline empty for no deadline. Overdue incomplete tasks are highlighted in red.
+      </div>
+
+      <div class="tasks" id="tasksList" aria-live="polite" style="margin-top:16px;"></div>
+      <div id="emptyState" style="text-align:center; color:var(--muted); margin-top:14px;">No tasks yet — add your first task!</div>
+    </section>
+  </div>
+
+  <script>
+    /* ---------- Utilities ---------- */
+    const $ = sel => document.querySelector(sel);
+    const qs = sel => document.querySelectorAll(sel);
+
+    /* ---------- Storage keys ---------- */
+    const STORAGE_KEY = 'todo_app_tasks_v1';
+
+    /* ---------- Elements ---------- */
+    const taskForm = $('#taskForm');
+    const titleInput = $('#title');
+    const deadlineInput = $('#deadline');
+    const saveBtn = $('#saveBtn');
+    const cancelEditBtn = $('#cancelEdit');
+    const tasksList = $('#tasksList');
+    const emptyState = $('#emptyState');
+
+    /* ---------- App state ---------- */
+    let tasks = [];           // tasks array in memory
+    let editingId = null;     // id of task being edited (null if adding)
+
+    /* ---------- Load / Save ---------- */
+    function loadTasks(){
+      try{
+        const raw = localStorage.getItem(STORAGE_KEY);
+        tasks = raw ? JSON.parse(raw) : [];
+      }catch(e){ tasks = []; console.error('Failed to load tasks', e); }
+    }
+    function saveTasks(){
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+    }
+
+    /* ---------- Helpers ---------- */
+    function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+
+    // Normalize a datetime-local input value (which is "YYYY-MM-DDTHH:MM") to a Date object.
+    function parseDatetimeLocal(value){
+      if(!value) return null;
+      const d = new Date(value);
+      if (isNaN(d)) return null;
+      return d;
+    }
+
+    // Is a task overdue? (deadline exists, not completed, deadline < now)
+    function isOverdue(task){
+      if(!task.deadline) return false;
+      if(task.completed) return false;
+      const now = new Date();
+      const dl = new Date(task.deadline);
+      return dl < now;
+    }
+
+    // Format date/time for UI
+    function formatDeadline(val){
+      if(!val) return '';
+      const d = new Date(val);
+      if(isNaN(d)) return '';
+      return d.toLocaleString();
+    }
+
+    /* ---------- Render ---------- */
+    function render(){
+      tasksList.innerHTML = '';
+      if(tasks.length === 0){
+        emptyState.style.display = 'block';
+      } else {
+        emptyState.style.display = 'none';
+      }
+
+      // sort tasks: incomplete with nearest deadline first, then others, then completed
+      const sorted = [...tasks].sort((a,b)=>{
+        if(a.completed !== b.completed) return a.completed ? 1 : -1;
+        if(a.deadline && b.deadline){
+          return new Date(a.deadline) - new Date(b.deadline);
+        }
+        if(a.deadline) return -1;
+        if(b.deadline) return 1;
+        return 0;
+      });
+
+      for(const t of sorted){
+        const item = document.createElement('article');
+        item.className = 'task' + (t.completed ? ' completed' : '') + (isOverdue(t) ? ' overdue' : '');
+        item.setAttribute('data-id', t.id);
+        item.innerHTML = `
+          <div class="left">
+            <input type="checkbox" class="toggleComplete" ${t.completed ? 'checked' : ''} aria-label="Toggle complete">
+            <div style="min-width:0">
+              <div class="title" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</div>
+              <div class="meta">${t.deadline ? 'Due: ' + formatDeadline(t.deadline) : 'No deadline'}${t.completed ? ' • Completed' : ''}</div>
+            </div>
+          </div>
+          <div class="controls" role="group" aria-label="Task actions">
+            <button class="btn-icon editBtn" title="Edit task">✏️</button>
+            <button class="btn-icon deleteBtn" title="Delete task">🗑️</button>
+          </div>
+        `;
+        // handlers
+        const checkbox = item.querySelector('.toggleComplete');
+        checkbox.addEventListener('change', () => toggleComplete(t.id, checkbox.checked));
+        item.querySelector('.editBtn').addEventListener('click', () => startEdit(t.id));
+        item.querySelector('.deleteBtn').addEventListener('click', () => deleteTask(t.id));
+        tasksList.appendChild(item);
+      }
+    }
+
+    /* ---------- CRUD operations ---------- */
+    function addTask(title, deadline){
+      const task = {
+        id: uid(),
+        title: title.trim(),
+        deadline: deadline ? new Date(deadline).toISOString() : null,
+        completed: false,
+        createdAt: new Date().toISOString()
+      };
+      tasks.push(task);
+      saveTasks();
+      render();
+    }
+
+    function startEdit(id){
+      const t = tasks.find(x => x.id === id);
+      if(!t) return;
+      editingId = id;
+      titleInput.value = t.title;
+      deadlineInput.value = t.deadline ? new Date(t.deadline).toISOString().slice(0,16) : '';
+      saveBtn.textContent = 'Save Changes';
+      cancelEditBtn.style.display = 'inline-block';
+      titleInput.focus();
+    }
+
+    function cancelEdit(){
+      editingId = null;
+      taskForm.reset();
+      saveBtn.textContent = 'Add Task';
+      cancelEditBtn.style.display = 'none';
+    }
+
+    function saveEdit(id, newTitle, newDeadline){
+      const t = tasks.find(x => x.id === id);
+      if(!t) return;
+      t.title = newTitle.trim();
+      t.deadline = newDeadline ? new Date(newDeadline).toISOString() : null;
+      saveTasks();
+      cancelEdit();
+      render();
+    }
+
+    function deleteTask(id){
+      if(!confirm('Delete this task?')) return;
+      tasks = tasks.filter(x => x.id !== id);
+      saveTasks();
+      render();
+    }
+
+    function toggleComplete(id, isCompleted){
+      const t = tasks.find(x => x.id === id);
+      if(!t) return;
+      t.completed = !!isCompleted;
+      saveTasks();
+      render();
+    }
+
+    /* ---------- Form handling ---------- */
+    taskForm.addEventListener('submit', (e)=>{
+      e.preventDefault();
+      const title = titleInput.value.trim();
+      const deadlineVal = deadlineInput.value;
+      if(!title){
+        alert('Please provide a task title.');
+        return;
+      }
+
+      if(editingId){
+        saveEdit(editingId, title, deadlineVal);
+      } else {
+        addTask(title, deadlineVal);
+        taskForm.reset();
+      }
+    });
+
+    cancelEditBtn.addEventListener('click', cancelEdit);
+
+    /* ---------- Escape helper for title (prevent HTML injection in title tooltip) ---------- */
+    function escapeHtml(str){
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    /* ---------- Startup / periodic checks ---------- */
+    function init(){
+      loadTasks();
+      render();
+
+      // Re-render every 30s to update overdue states without reload.
+      setInterval(render, 30000);
+    }
+    init();
+  </script>
+</body>
+</html>
